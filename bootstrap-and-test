@@ -1,0 +1,29 @@
+#!/bin/bash
+
+set -e
+SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
+
+pushd "$SELF_DIR" > /dev/null
+
+# Setup the .venv
+if [ ! -d "$SELF_DIR/.venv" ]; then
+    "$SELF_DIR/scripts/setup-venv" 3.9
+else
+    echo "[bootstrap-and-test]: .venv directory already exists. Skipping setup."
+fi
+
+# Run tests
+if [ -d "$SELF_DIR/tests" ]; then
+    "$SELF_DIR/.venv/bin/python" -m unittest discover -s "$SELF_DIR/tests"
+fi
+
+# Reformat everything with black
+"$SELF_DIR/.venv/bin/python" -m black "$SELF_DIR/src"
+
+if [ -d "$SELF_DIR/tests" ]; then
+    "$SELF_DIR/.venv/bin/python" -m black "$SELF_DIR/tests"
+fi
+
+popd > /dev/null
+
+echo "GOOD TO GO!"

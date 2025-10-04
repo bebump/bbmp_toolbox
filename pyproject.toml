@@ -1,0 +1,21 @@
+[project]
+name = "bbmp_toolbox"
+version = "1.0.0"
+authors = [
+  { name="Attila Szarvas", email="attila.szarvas@gmail.com" },
+]
+description = "Wraps text to a given line length"
+readme = "README.md"
+requires-python = ">=3.9, <3.15"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = {file = "LICENSE.md"}
+
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+bbmp_toolbox = ["py.typed"]

@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Script constants
+SELF_NAME="$(basename "$0")"
+SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
+SELF_PATH="$SELF_DIR/$SELF_NAME"
+MIN_PYTHON_VERSION="3.12"
+
+# This script will try to change this to a concrete executable under pyenv
+PYTHON_EXECUTABLE="$(which python3)"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Handle command line arguments
+print_usage() {
+    echo "Usage: $SELF_NAME [PYTHON_VERSION]"
+    echo "  -h                Show this help message."
+    echo "  PYTHON_VERSION    Python version in the form X.Y.Z (e.g., 3.12.0)"
+}
+
+# Check for -h or invalid positional argument
+if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    print_usage
+    exit 0
+fi
+
+if [ -n "$1" ]; then
+    if ! echo "$1" | grep -Eq '^[0-9]+\.[0-9]+$'; then
+        echo "[$SCRIPT_NAME]: ERROR: Invalid Python version format: '$1'" >&2
+        print_usage
+        exit 1
+    else
+        MIN_PYTHON_VERSION="$1"
+    fi
+fi
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+SCRIPT_NAME="setup-venv"
+COMMAND_BUFFER="$(mktemp)"
+RED="\033[0;31m"
+NC="\033[0m" # No Color
+
+clean_exit() {
+    rm -f "$COMMAND_BUFFER"
+    exit "$1"
+}
+
+log_info() {
+    echo "[$SCRIPT_NAME]: $1" | fold -s -w "$(tput cols)"
+}
+
+log_error() {
+    echo -e "${RED}[$SCRIPT_NAME]: ERROR: $1${NC}" | fold -s -w "$(tput cols)" >&2
+}
+
+log_error_dump() {
+    echo -e "${RED}$1${NC}" >&2
+}
+
+log_warning() {
+    echo -e "${RED}[$SCRIPT_NAME]: WARNING: $1${NC}" | fold -s -w "$(tput cols)" >&2
+}
+
+check_pyenv() {
+    if ! command -v pyenv &> /dev/null; then
+        return 1
+    fi
+
+    return 0
+}
+
+python_version_greater_equal() {
+    local python_cmd="$1"
+    local min_version="$2"
+
+    if ! version_output=$("$python_cmd" -c "import sys; exit(0 if tuple(map(int, sys.version.split()[0].split('.'))) >= tuple(map(int, '$min_version'.split('.'))) else 1)"); then
+        return 1
+    fi
+    return 0
+}
+
+if check_pyenv; then
+    if ! pyenv latest $MIN_PYTHON_VERSION > /dev/null 2>&1; then
+        log_info "Python version $MIN_PYTHON_VERSION was not found in pyenv. Installing."
+
+        if ! pyenv install $MIN_PYTHON_VERSION > "$COMMAND_BUFFER" 2>&1; then
+            log_error "Failed to install Python $MIN_PYTHON_VERSION using pyenv."
+            log_error "During the failed operation the following output was emitted:"
+            log_error "--------------------"
+            log_error_dump "$(cat "$COMMAND_BUFFER")"
+            clean_exit 1
+        fi
+    fi
+
+    PYTHON_EXECUTABLE="$(pyenv root)/versions/$(pyenv latest $MIN_PYTHON_VERSION)/bin/python"
+else
+    log_warning "pyenv isn't installed. Attempting to use PYTHON_EXECUTABLE. Note, that if this is managed by brew, it can disappear at any brew upgrade." | fold -s -w "$(tput cols)"
+
+    if ! python_version_greater_equal $PYTHON_EXECUTABLE $MIN_PYTHON_VERSION; then
+        log_error "Python version doesn't meet the $MIN_PYTHON_VERSION+ requirement and pyenv isn't installed either. It's recommended to install pyenv and retry this command. On MacOS you can use 'brew install pyenv'. Alternatively, you can install Python $MIN_PYTHON_VERSION manually, and ensure it's in your PATH."
+        clean_exit 1
+    fi
+fi
+
+if ! "$PYTHON_EXECUTABLE" -m venv .venv; then
+    log_error "Failed to create virtual environment at \"$(pwd)/.venv\"."
+    return 1
+fi
+
+if ! "$PYTHON_EXECUTABLE" -m venv .venv; then
+    log_error "Failed to create virtual environment at \"$(pwd)/.venv\"."
+    return 1
+else
+    log_info "Created virtual environment at \"$(pwd)/.venv\"."
+fi
+
+VENV_PYTHON_EXECUTABLE=".venv/bin/python"
+
+log_info "Upgrading pip in the virtual environment."
+if ! "$VENV_PYTHON_EXECUTABLE" -m pip install --upgrade pip > "$COMMAND_BUFFER" 2>&1; then
+    log_error "Failed to upgrade pip in the virtual environment. During the failed operation the following output was emitted:"
+    log_error "--------------------"
+    log_error_dump "$(cat "$COMMAND_BUFFER")"
+    clean_exit 1
+fi
+
+if [ ! -f ".gitignore" ]; then
+    echo "[$SCRIPT_NAME]: Creating basic .gitignore for Python projects"
+    cat << HERE_DOCUMENT_MARK > ".gitignore"
+.idea
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache
+.DS_Store
+env
+venv
+.venv
+*.egg-info
+build
+test_logs
+HERE_DOCUMENT_MARK
+fi
+
+if [ -f requirements.txt ]; then
+    echo "[$SCRIPT_NAME]: Installing packages from requirements.txt into the virtual environment." | fold -s -w "$(tput cols)"
+
+    COMMAND_BUFFER="$(mktemp)"
+    if ! "$VENV_PYTHON_EXECUTABLE" -m pip install -r requirements.txt > "$COMMAND_BUFFER" 2>&1; then
+        log_error "Failed to install packages from \"$(pwd)/requirements.txt\". During the failed operation the following output was emitted:"
+        log_error "--------------------"
+        log_error_dump "$(cat "$COMMAND_BUFFER")"
+        clean_exit 1
+    fi
+fi
+
+log_info "To activate the environment, issue: 'source .venv/bin/activate'"
+log_info "To deactivate it, issue: 'deactivate'"
+clean_exit 0
