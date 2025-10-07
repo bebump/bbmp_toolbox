@@ -179,7 +179,6 @@ dependencies in the requirements.txt file, if present, and creates a
 
 EXAMPLE:
 
-
     something 3.10
 
         This will set up the .venv using version 3.10 of Python. It will

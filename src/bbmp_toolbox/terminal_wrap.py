@@ -89,8 +89,8 @@ class Block:
 def process_multiline_verbatim_blocks(text: str) -> list[Block]:
     blocks: list[Block] = []
 
-    for i, block in enumerate(text.split("```")):
-        blocks.append(Block(block, i % 2 == 1))
+    for i, b in enumerate(text.split("```")):
+        blocks.append(Block(b, i % 2 == 1))
 
     for i, block in enumerate(blocks):
         if block.is_verbatim and i > 0:
@@ -217,6 +217,10 @@ def terminal_wrap(text: str, width: Union[int, None] = None) -> str:
             wrapped = [""]
 
         if i > 0 and paragraphs[i - 1].is_verbatim and not wrapped[0]:
+            wrapped[0] = lines[-1] + wrapped[0]
+            lines.pop()
+
+        if p.is_verbatim and lines and not lines[-1]:
             wrapped[0] = lines[-1] + wrapped[0]
             lines.pop()
 
