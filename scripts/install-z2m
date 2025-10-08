@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Script constants
+SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
+SETUP_VENV_SCRIPT="$SELF_DIR/setup-venv"
+
+# This can be an exact or approximate version. setup-venv will pick the best
+# match.
+USE_PYTHON_VERSION="3.12"
+
+# This needs to be an exact version that nodeenv knows about.
+USE_NODE_VERSION="22.22.0"
+
+ZIGBEE2MQTT_VERSION="2.6.1"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Setup logging and error reporting
+SCRIPT_NAME="$(basename "$0")"
+COMMAND_BUFFER="$(mktemp)"
+RED="\033[0;31m"
+NC="\033[0m" # No Color
+
+trap "rm -f "$COMMAND_BUFFER EXIT
+
+log_info() {
+    echo "[$SCRIPT_NAME]: $1" | fold -s -w "$(tput cols)"
+}
+
+log_error() {
+    echo -e "${RED}[$SCRIPT_NAME]: ERROR: $1${NC}" | fold -s -w "$(tput cols)" >&2
+}
+
+log_error_dump() {
+    echo -e "${RED}$1${NC}" >&2
+}
+
+log_warning() {
+    echo -e "${RED}[$SCRIPT_NAME]: WARNING: $1${NC}" | fold -s -w "$(tput cols)" >&2
+}
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+$SETUP_VENV_SCRIPT $USE_PYTHON_VERSION
+source .venv/bin/activate
+
+log_info "Installing nodeenv into the local Python virtual environment."
+if ! pip install nodeenv > "$COMMAND_BUFFER" 2>&1; then
+    log_error "Failed to install nodeenv using 'pip install nodeenv'"
+    log_error "During the failed operation the following output was emitted:"
+    log_error "--------------------"
+    log_error_dump "$(cat "$COMMAND_BUFFER")"
+    exit 1
+fi
+
+log_info "Installing node.js version $USE_NODE_VERSION using nodeenv."
+if ! nodeenv -p -n $USE_NODE_VERSION > "$COMMAND_BUFFER" 2>&1; then
+    log_error "Failed to node version $USE_NODE_VERSION using 'nodeenv -p -n $USE_NODE_VERSION'"
+    log_error "During the failed operation the following output was emitted:"
+    log_error "--------------------"
+    log_error_dump "$(cat "$COMMAND_BUFFER")"
+    exit 1
+fi
+
+# The -p switch instructed nodeenv add node.js related stuff to the virtual
+# environment. We reactivate the venv to ensure that nodeenv added paths are
+# also active.
+deactivate
+source .venv/bin/activate
+
+log_info "Installing pnpm using npm."
+if ! npm install pnpm --save-dev > "$COMMAND_BUFFER" 2>&1; then
+    log_error "Failed to install pnpm using 'npm install pnpm --save-dev'"
+    log_error "During the failed operation the following output was emitted:"
+    log_error "--------------------"
+    log_error_dump "$(cat "$COMMAND_BUFFER")"
+    exit 1
+fi
+
+export PATH="$(pwd)/node_modules/.bin:$PATH"
+
+log_info "Cloning zigbee2mqtt version $ZIGBEE2MQTT_VERSION"
+if ! git clone --depth 1 --branch $ZIGBEE2MQTT_VERSION https://github.com/Koenkk/zigbee2mqtt.git > "$COMMAND_BUFFER" 2>&1; then
+    log_error "Failed to download zigbee2mqtt using 'git clone --depth 1 --branch ZIGBEE2MQTT_VERSION https://github.com/Koenkk/zigbee2mqtt.git'"
+    log_error "During the failed operation the following output was emitted:"
+    log_error "--------------------"
+    log_error_dump "$(cat "$COMMAND_BUFFER")"
+    exit 1
+fi
+
+pushd zigbee2mqtt &> /dev/null;
+
+log_info "Installing zigbee2mqtt"
+if ! pnpm install --frozen-lockfile > "$COMMAND_BUFFER" 2>&1; then
+    log_error "Failed to install zigbee2mqtt using 'pnpm install --frozen-lockfile'"
+    log_error "During the failed operation the following output was emitted:"
+    log_error "--------------------"
+    log_error_dump "$(cat "$COMMAND_BUFFER")"
+    exit 1
+fi
+
+log_info "zigbee2mqtt installed. If you want to uninstall it, delete this directory: '$(pwd)'. \
+If you aren't using pnpm for anything else, you can also delete the pnpm store directory: '$(pnpm store path)'."
+
+popd &> /dev/null;
+
+RUN_Z2M_SCRIPT="$(pwd)/run-z2m"
+
+cat << 'HERE_DOCUMENT_MARK' > "$RUN_Z2M_SCRIPT"
+#!/usr/bin/env bash
+SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
+cd "$SELF_DIR"
+source .venv/bin/activate
+export PATH="$(pwd)/node_modules/.bin:$PATH"
+cd zigbee2mqtt
+pnpm start
+HERE_DOCUMENT_MARK
+
+chmod +x "$RUN_Z2M_SCRIPT"
+
+log_info "Installation complete. You can run zigbee2mqtt by executing '$RUN_Z2M_SCRIPT' from any directory."

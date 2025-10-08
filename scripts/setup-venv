@@ -41,10 +41,7 @@ COMMAND_BUFFER="$(mktemp)"
 RED="\033[0;31m"
 NC="\033[0m" # No Color
 
-clean_exit() {
-    rm -f "$COMMAND_BUFFER"
-    exit "$1"
-}
+trap "rm -f "$COMMAND_BUFFER EXIT
 
 log_info() {
     echo "[$SCRIPT_NAME]: $1" | fold -s -w "$(tput cols)"
@@ -89,7 +86,7 @@ if check_pyenv; then
             log_error "During the failed operation the following output was emitted:"
             log_error "--------------------"
             log_error_dump "$(cat "$COMMAND_BUFFER")"
-            clean_exit 1
+            exit 1
         fi
     fi
 
@@ -99,7 +96,7 @@ else
 
     if ! python_version_greater_equal $PYTHON_EXECUTABLE $MIN_PYTHON_VERSION; then
         log_error "Python version doesn't meet the $MIN_PYTHON_VERSION+ requirement and pyenv isn't installed either. It's recommended to install pyenv and retry this command. On MacOS you can use 'brew install pyenv'. Alternatively, you can install Python $MIN_PYTHON_VERSION manually, and ensure it's in your PATH."
-        clean_exit 1
+        exit 1
     fi
 fi
 
@@ -122,7 +119,7 @@ if ! "$VENV_PYTHON_EXECUTABLE" -m pip install --upgrade pip > "$COMMAND_BUFFER" 
     log_error "Failed to upgrade pip in the virtual environment. During the failed operation the following output was emitted:"
     log_error "--------------------"
     log_error_dump "$(cat "$COMMAND_BUFFER")"
-    clean_exit 1
+    exit 1
 fi
 
 if [ ! -f ".gitignore" ]; then
@@ -151,10 +148,10 @@ if [ -f requirements.txt ]; then
         log_error "Failed to install packages from \"$(pwd)/requirements.txt\". During the failed operation the following output was emitted:"
         log_error "--------------------"
         log_error_dump "$(cat "$COMMAND_BUFFER")"
-        clean_exit 1
+        exit 1
     fi
 fi
 
 log_info "To activate the environment, issue: 'source .venv/bin/activate'"
 log_info "To deactivate it, issue: 'deactivate'"
-clean_exit 0
+exit 0
