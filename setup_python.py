@@ -3,7 +3,7 @@ import logging
 import sys
 from argparse import ArgumentParser, ArgumentTypeError
 
-from bbmp_toolbox import BbmpHelpFormatter, terminal_wrap
+from bbmp_toolbox import BbmpHelpFormatter, BbmpLogFormatter
 
 
 _SCRIPT_NAME = "setup_python.py"
@@ -28,23 +28,16 @@ EXAMPLE:
 """
 
 
-class BbmpLogFormatter(logging.Formatter):
-    def __init__(self, format: str):
-        super().__init__(format)
-
-    def formatMessage(self, record):
-        return terminal_wrap(super().formatMessage(record))
-
-
 def setup_logger(verbose: bool = False) -> logging.Logger:
-    """Set up and configure the module logger."""
     logger = logging.getLogger(_SCRIPT_NAME)
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
 
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler()
     handler.setLevel(logging.DEBUG if verbose else logging.INFO)
 
-    formatter = BbmpLogFormatter(f"[%(name)s]: %(levelname)s:  %(message)s")
+    formatter = BbmpLogFormatter(
+        f"[%(name)s]: %(levelname)s: %(message)s", indent_message=True
+    )
     handler.setFormatter(formatter)
 
     logger.addHandler(handler)
