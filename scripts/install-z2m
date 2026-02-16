@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# Script constants
-SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
-SETUP_VENV_SCRIPT="$SELF_DIR/setup-venv"
-
+# Configuration. I'll update these values from time to time.
+#
 # This can be an exact or approximate version. setup-venv will pick the best
 # match.
 USE_PYTHON_VERSION="3.12"
@@ -13,6 +11,12 @@ USE_PYTHON_VERSION="3.12"
 USE_NODE_VERSION="22.22.0"
 
 ZIGBEE2MQTT_VERSION="2.6.1"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Script constants
+SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
+SETUP_VENV_SCRIPT="$SELF_DIR/setup-venv"
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -104,15 +108,24 @@ If you aren't using pnpm for anything else, you can also delete the pnpm store d
 
 popd &> /dev/null;
 
+cp "$SELF_DIR/check-if-z2m-mqtt-is-listening" .
+
 RUN_Z2M_SCRIPT="$(pwd)/run-z2m"
 
 cat << 'HERE_DOCUMENT_MARK' > "$RUN_Z2M_SCRIPT"
 #!/usr/bin/env bash
+
 SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
 cd "$SELF_DIR"
 source .venv/bin/activate
 export PATH="$(pwd)/node_modules/.bin:$PATH"
 cd zigbee2mqtt
+
+if ! "$SELF_DIR/check-if-z2m-mqtt-is-listening"; then
+    echo "Error: MQTT broker is not listening. Please start the MQTT broker before running zigbee2mqtt."
+    exit 1
+fi
+
 pnpm start
 HERE_DOCUMENT_MARK
 
