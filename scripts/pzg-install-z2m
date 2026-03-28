@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 
+# This is the only script you need to run if you want to install Zigbee2MQTT in
+# a largely self-contained manner.
+#
+# Executing this script sets up a Python virtual environment in the working
+# directory, installs nodeenv, an appropriate version of node, pnpm, clones a
+# particular version of Zigbee2MQTT, and creates a run script and service
+# installation script.
+
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 # Configuration. I'll update these values from time to time.
 #
-# This can be an exact or approximate version. setup-venv will pick the best
+# This can be an exact or approximate version. pzg-setup-venv will pick the best
 # match.
 USE_PYTHON_VERSION="3.12"
 
@@ -16,7 +24,7 @@ ZIGBEE2MQTT_VERSION="2.6.1"
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 # Script constants
 SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
-SETUP_VENV_SCRIPT="$SELF_DIR/setup-venv"
+SETUP_VENV_SCRIPT="$SELF_DIR/pzg-setup-venv"
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -108,7 +116,74 @@ If you aren't using pnpm for anything else, you can also delete the pnpm store d
 
 popd &> /dev/null;
 
-cp "$SELF_DIR/check-if-z2m-mqtt-is-listening" .
+MQTT_PRECHECK_SCRIPT="$(pwd)/check-if-z2m-mqtt-is-listening"
+
+cat << 'HERE_DOCUMENT_MARK' > "$MQTT_PRECHECK_SCRIPT"
+#!/usr/bin/env python3
+
+# YOU ARE NOT SUPPOSED TO MANUALLY CALL THIS SCRIPT
+#
+# It is used by install-z2m to determine if the MQTT server in its configuration
+# is up and running. This way a service manager can avoid starting Zigbee2MQTT
+# before the MQTT server is up, avoiding missing device information observed
+# in version 2.6.1.
+
+import socket
+from pathlib import Path
+from time import sleep
+
+
+# The absolute minimum YAML parsing to avoid a dependency on a YAML library.
+def get_mqtt_address(config_path):
+    if not config_path.exists():
+        return None
+
+    state = "init"
+
+    with open(config_path) as f:
+        for line in f:
+            if state == "init":
+                if line.startswith("mqtt:"):
+                    state = "mqtt_section"
+                continue
+            if state == "mqtt_section":
+                if not line.startswith(" "):
+                    # End of MQTT section, no address found
+                    return None
+                if "server:" in line:
+                    return line.split(":", 1)[1].strip()
+                continue
+
+    return None
+
+
+mqtt_host = get_mqtt_address(Path("data") / "configuration.yaml")
+
+if mqtt_host is None:
+    # We didn't find the MQTT configuration, so we can't check it. Maybe Z2M
+    # isn't configured yet. We don't know for sure so we don't block further
+    # operations.
+    exit(0)
+
+address, _, maybe_port = mqtt_host.replace("mqtt://", "").partition(":")
+
+try:
+    port = int(maybe_port) if maybe_port else 1883
+except ValueError:
+    exit(0)
+
+
+try:
+    with socket.create_connection((address, port), timeout=5):
+        exit(0)
+except Exception as e:
+    pass
+
+sleep(5)
+exit(1)
+HERE_DOCUMENT_MARK
+
+chmod u+x "$MQTT_PRECHECK_SCRIPT"
 
 RUN_Z2M_SCRIPT="$(pwd)/run-z2m"
 
@@ -129,6 +204,6 @@ fi
 pnpm start
 HERE_DOCUMENT_MARK
 
-chmod +x "$RUN_Z2M_SCRIPT"
+chmod u+x "$RUN_Z2M_SCRIPT"
 
 log_info "Installation complete. You can run zigbee2mqtt by executing '$RUN_Z2M_SCRIPT' from any directory."
