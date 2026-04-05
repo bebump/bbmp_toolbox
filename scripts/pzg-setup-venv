@@ -36,7 +36,7 @@ if [ -n "$1" ]; then
 fi
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-SCRIPT_NAME="setup-venv"
+SCRIPT_NAME="pzg-setup-venv"
 COMMAND_BUFFER="$(mktemp)"
 RED="\033[0;31m"
 NC="\033[0m" # No Color

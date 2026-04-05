@@ -25,6 +25,9 @@ ZIGBEE2MQTT_VERSION="2.6.1"
 # Script constants
 SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
 SETUP_VENV_SCRIPT="$SELF_DIR/pzg-setup-venv"
+RUN_Z2M_SCRIPT="$(pwd)/pzg-run-z2m"
+START_SERVICE_SCRIPT="$(pwd)/pzg-install-and-start-z2m-as-a-service"
+STOP_SERVICE_SCRIPT="$(pwd)/pzg-stop-and-uninstall-z2m-as-a-service"
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -111,9 +114,6 @@ if ! pnpm install --frozen-lockfile > "$COMMAND_BUFFER" 2>&1; then
     exit 1
 fi
 
-log_info "zigbee2mqtt installed. If you want to uninstall it, delete this directory: '$(pwd)'. \
-If you aren't using pnpm for anything else, you can also delete the pnpm store directory: '$(pnpm store path)'."
-
 popd &> /dev/null;
 
 MQTT_PRECHECK_SCRIPT="$(pwd)/check-if-z2m-mqtt-is-listening"
@@ -141,6 +141,12 @@ def get_mqtt_address(config_path):
     state = "init"
 
     with open(config_path) as f:
+        if "network_key: GENERATE" in f.read():
+            # The configuration file is still in its default state, so we can't be
+            # sure about the MQTT configuration. Maybe Z2M isn't configured yet.
+            # We don't know for sure so we don't block further operations.
+            return None
+
         for line in f:
             if state == "init":
                 if line.startswith("mqtt:"):
@@ -185,8 +191,6 @@ HERE_DOCUMENT_MARK
 
 chmod u+x "$MQTT_PRECHECK_SCRIPT"
 
-RUN_Z2M_SCRIPT="$(pwd)/run-z2m"
-
 cat << 'HERE_DOCUMENT_MARK' > "$RUN_Z2M_SCRIPT"
 #!/usr/bin/env bash
 
@@ -206,4 +210,184 @@ HERE_DOCUMENT_MARK
 
 chmod u+x "$RUN_Z2M_SCRIPT"
 
-log_info "Installation complete. You can run zigbee2mqtt by executing '$RUN_Z2M_SCRIPT' from any directory."
+cat << 'HERE_DOCUMENT_MARK' > "$START_SERVICE_SCRIPT"
+#!/bin/bash
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Configuration.
+SERVICE_NAME="io.zigbee2mqtt"
+SERVICE_PATH="$HOME/Library/LaunchAgents/$SERVICE_NAME.plist"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Script constants
+SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
+RUN_Z2M_SCRIPT="$SELF_DIR/pzg-run-z2m"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Setup logging and error reporting
+SCRIPT_NAME="$(basename "$0")"
+COMMAND_BUFFER="$(mktemp)"
+RED="\033[0;31m"
+NC="\033[0m" # No Color
+
+trap "rm -f "$COMMAND_BUFFER EXIT
+
+log_info() {
+    echo "[$SCRIPT_NAME]: $1" | fold -s -w "$(tput cols)"
+}
+
+log_error() {
+    echo -e "${RED}[$SCRIPT_NAME]: ERROR: $1${NC}" | fold -s -w "$(tput cols)" >&2
+}
+
+log_error_dump() {
+    echo -e "${RED}$1${NC}" >&2
+}
+
+log_warning() {
+    echo -e "${RED}[$SCRIPT_NAME]: WARNING: $1${NC}" | fold -s -w "$(tput cols)" >&2
+}
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+if [[ "$(uname)" != "Darwin" ]]; then
+    log_error "This script is only supported on macOS."
+    return 0
+fi
+
+$SELF_DIR/pzg-stop-and-uninstall-z2m-as-a-service
+
+log_info "Installing zigbee2mqtt service at $SERVICE_PATH"
+
+cat << HEREDOC > "$SERVICE_PATH"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$SERVICE_NAME</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>$RUN_Z2M_SCRIPT</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>$SELF_DIR</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/$SERVICE_NAME/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/$SERVICE_NAME/stderr.log</string>
+</dict>
+</plist>
+HEREDOC
+
+log_info "Loading service..."
+launchctl load $SERVICE_PATH
+
+if [ $? -ne 0 ]; then
+    echo "[pyziggy-setup] Error: Failed to load service $SERVICE_PATH"
+    exit 1
+else
+    echo "[pyziggy-setup] Done."
+    echo "[pyziggy-setup] Service logs are saved to /tmp/$SERVICE_NAME/stdout.log and /tmp/$SERVICE_NAME/stderr.log"
+fi
+HERE_DOCUMENT_MARK
+
+chmod u+x "$START_SERVICE_SCRIPT"
+
+cat << 'HERE_DOCUMENT_MARK' > "$STOP_SERVICE_SCRIPT"
+#!/bin/bash
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Configuration.
+SERVICE_NAME="io.zigbee2mqtt"
+SERVICE_PATH="$HOME/Library/LaunchAgents/$SERVICE_NAME.plist"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Script constants
+SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Setup logging and error reporting
+SCRIPT_NAME="$(basename "$0")"
+COMMAND_BUFFER="$(mktemp)"
+RED="\033[0;31m"
+NC="\033[0m" # No Color
+
+trap "rm -f "$COMMAND_BUFFER EXIT
+
+log_info() {
+    echo "[$SCRIPT_NAME]: $1" | fold -s -w "$(tput cols)"
+}
+
+log_error() {
+    echo -e "${RED}[$SCRIPT_NAME]: ERROR: $1${NC}" | fold -s -w "$(tput cols)" >&2
+}
+
+log_error_dump() {
+    echo -e "${RED}$1${NC}" >&2
+}
+
+log_warning() {
+    echo -e "${RED}[$SCRIPT_NAME]: WARNING: $1${NC}" | fold -s -w "$(tput cols)" >&2
+}
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+if [[ "$(uname)" != "Darwin" ]]; then
+    log_error "This script is only supported on macOS."
+    return 0
+fi
+
+mkdir -p ~/Library/LaunchAgents
+
+if [ -f "$SERVICE_PATH" ] && (launchctl list | grep -q "$SERVICE_NAME"); then
+    log_info "Stopping and removing $SERVICE_NAME..."
+    launchctl unload "$SERVICE_PATH" && rm $SERVICE_PATH
+
+    if [ $? -ne 0 ]; then
+        log_error "Failed to unload and remove service $SERVICE_PATH"
+        exit 1
+    else
+        log_info "Done."
+    fi
+
+    rm /tmp/$SERVICE_NAME/stdout.log
+    rm /tmp/$SERVICE_NAME/stderr.log
+else
+    log_info "No $SERVICE_NAME installation found."
+fi
+HERE_DOCUMENT_MARK
+
+chmod u+x "$STOP_SERVICE_SCRIPT"
+
+cat << HERE_DOCUMENT_MARK > "UNINSTALL.md"
+This directory contains a self-contained Zigbee2MQTT installation.
+
+The Zigbee2MQTT configuration can be found in the \`zigbee2mqtt/data\` directory.
+If you want to keep it, make sure to back up this directory before uninstalling.
+You can copy this directory into a fresh installation to restore the
+configuration.
+
+To uninstall Zigbee2MQTT, first run \`./pzg-stop-and-uninstall-z2m-as-a-service\`
+to stop the service and remove it.
+
+Then you can delete this entire directory. This installation depends on \`pnpm\`.
+If you aren't using it for anything else, you can also delete the pnpm store
+directory: '$(pnpm store path)'."
+HERE_DOCUMENT_MARK
+
+log_info "Installation complete. See UNINSTALL.md for instructions about uninstalling."
+log_info "You can install zigbee2mqtt as a service and launch it by issuing:"
+log_info "    ./pzg-install-and-start-z2m-as-a-service"
