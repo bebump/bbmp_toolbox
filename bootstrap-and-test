@@ -7,7 +7,7 @@ pushd "$SELF_DIR" > /dev/null
 
 # Setup the .venv
 if [ ! -d "$SELF_DIR/.venv" ]; then
-    "$SELF_DIR/scripts/setup-venv" 3.9
+    "$SELF_DIR/scripts/pzg-setup-venv" 3.9
 else
     echo "[bootstrap-and-test]: .venv directory already exists. Skipping setup."
 fi

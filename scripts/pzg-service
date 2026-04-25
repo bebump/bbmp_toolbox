@@ -1,0 +1,86 @@
+#!/bin/bash
+
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+  cat >&2 <<EOF
+Install a service using a service.ini descriptor.
+EOF
+  exit 0
+fi
+
+# Usage: get_ini_value <file> <key> [section]
+# Example:
+#   configuration=$(get_ini_value "$HOME/program.ini" configuration-key section-of-key)
+#get_ini_value() {
+#  local file="$1"
+#  local key="$2"
+#  local section="$3"
+#
+#  if [[ -n "$section" ]]; then
+#    awk -F'\s*=\s*' "/^\[$section\]/{found=1} found && /^$key/{gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", \$2); print \$2; exit}" "$file"
+#  else
+#    awk -F'\s*=\s*' "/^$key/{gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", \$2); print \$2; exit}" "$file"
+#  fi
+#}
+#
+#get_ini_value /Users/ati/Developer/Python/somethings.ini urkh
+#echo $?
+
+# Usage: get_ini_value <file> <key> [section]
+#
+# Returns 0 if successful, 1 if the file is not found, and 2 if the key is not found.
+#
+# Example:
+#   configuration=$(get_ini_value "$HOME/program.ini" configuration-key section-of-key)
+get_ini_value() {
+  local file="$1"
+  local key="$2"
+  local section="$3"
+
+  if [[ ! -f "$file" ]]; then
+    echo "Error: file not found: $file" >&2
+    return 1
+  fi
+
+  local result
+  if [[ -n "$section" ]]; then
+    result=$(awk -F'\s*=\s*' "/^\[$section\]/{found=1} found && /^$key/{gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", \$2); print \$2; exit}" "$file")
+  else
+    result=$(awk -F'\s*=\s*' "/^$key/{gsub(/^[[:space:]]+|[[:space:]]+$/, \"\", \$2); print \$2; exit}" "$file")
+  fi
+
+  if [[ -z "$result" ]]; then
+    echo "Error: key '$key' not found" >&2
+    return 2
+  fi
+
+  echo "$result"
+}
+
+get_ini_value /Users/ati/Developer/Python/something.ini urkh
+echo $?
+
+# pzg-service install service.ini
+# pzg-service uninstall service.ini
+# pzg-service status service.ini
+# pzg-service --help
+#
+# If you omit the .ini file the service is installed on the current machine.
+
+# During script initialisation we should
+#   - Check that rsync is installed on the destination (?) machine, at least version 3.2.0. If not, print an error and
+#     information on how to install it.
+#   - Copy all subscripts to temp files, set the executable flag, and set traps to delete them on exit.
+#   - We shouldn't run the initialisation for --help.
+#   - Check for sudo (request password) on the destination machine early on, and if fails, explain that installing
+#     the service requires it.
+#
+#
+# pyziggy.ini
+# scripts/pzg-setup-venv
+# install.sh
+#
+# install.sh
+#     ./pzg-setup-venv
+#     source .venv/bin/activate
+#     pip install pyziggy
+#

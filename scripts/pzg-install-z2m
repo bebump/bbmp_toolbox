@@ -8,6 +8,13 @@
 # particular version of Zigbee2MQTT, and creates a run script and service
 # installation script.
 
+if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+  cat >&2 <<EOF
+Install z2m using a local Pythen env in a mostly self-contained way.
+EOF
+  exit 0
+fi
+
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 # Configuration. I'll update these values from time to time.
 #
@@ -216,7 +223,7 @@ cat << 'HERE_DOCUMENT_MARK' > "$START_SERVICE_SCRIPT"
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 # Configuration.
 SERVICE_NAME="io.zigbee2mqtt"
-SERVICE_PATH="$HOME/Library/LaunchAgents/$SERVICE_NAME.plist"
+SERVICE_PATH="/Library/LaunchDaemons/$SERVICE_NAME.plist"
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -267,6 +274,9 @@ cat << HEREDOC > "$SERVICE_PATH"
 <dict>
     <key>Label</key>
     <string>$SERVICE_NAME</string>
+
+    <key>UserName</key>
+    <string>$USER</string>
 
     <key>ProgramArguments</key>
     <array>
