@@ -1,57 +1,76 @@
 #!/usr/bin/env bash
 
-# This is the only script you need to run if you want to install Zigbee2MQTT in
-# a largely self-contained manner.
+# This is the only file you need to install Zigbee2MQTT.
 #
-# Executing this script sets up a Python virtual environment in the working
-# directory, installs nodeenv, an appropriate version of node, pnpm, clones a
-# particular version of Zigbee2MQTT, and creates a run script and service
-# installation script.
+# Run it in an empty directory. It downloads a pinned Node.js toolchain and a
+# pinned Zigbee2MQTT release, builds them, and generates run/service/uninstall
+# scripts alongside. Everything it creates lives in that one directory, with
+# two documented exceptions listed in the generated UNINSTALL.md.
+#
+# Requires macOS. Requires no Python, no git, no Homebrew, and no Xcode
+# Command Line Tools on the common path -- only tools shipped in the macOS
+# base system.
+#
+# See pzg-install-z2m-migration-plan.md for the reasoning behind these choices.
 
-if [[ "$1" == "--help" || "$1" == "-h" ]]; then
-  cat >&2 <<EOF
-Install z2m using a local Pythen env in a mostly self-contained way.
-EOF
-  exit 0
-fi
+set -euo pipefail
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 # Configuration. I'll update these values from time to time.
 #
-# This can be an exact or approximate version. pzg-setup-venv will pick the best
-# match.
-USE_PYTHON_VERSION="3.12"
+# The Zigbee2MQTT release tag to install. This is the line to edit to change
+# version. After bumping it, the script checks the release's own engines.node
+# field against USE_NODE_VERSION below and refuses to continue on a mismatch,
+# so a version bump that needs a newer Node tells you so.
+ZIGBEE2MQTT_VERSION="2.6.1"
 
-# This needs to be an exact version that nodeenv knows about.
+# Exact Node.js version. Must be a version published on nodejs.org, and must
+# satisfy the engines.node range of the Zigbee2MQTT release above.
+#
+# Note: pnpm is obtained through corepack, which ships bundled with Node. Its
+# status as a bundled component has been discussed upstream, so if you bump
+# Node to a major release, confirm corepack is still present.
 USE_NODE_VERSION="22.22.0"
 
-ZIGBEE2MQTT_VERSION="2.6.1"
+# launchd service identifier.
+SERVICE_NAME="io.zigbee2mqtt"
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 # Script constants
-SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
-SETUP_VENV_SCRIPT="$SELF_DIR/pzg-setup-venv"
-RUN_Z2M_SCRIPT="$(pwd)/pzg-run-z2m"
-START_SERVICE_SCRIPT="$(pwd)/pzg-install-and-start-z2m-as-a-service"
-STOP_SERVICE_SCRIPT="$(pwd)/pzg-stop-and-uninstall-z2m-as-a-service"
+SCRIPT_NAME="$(basename "$0")"
+PZG_ROOT="$(pwd)"
+
+NODE_DIR="$PZG_ROOT/node"
+NODE_BIN="$NODE_DIR/bin"
+Z2M_DIR="$PZG_ROOT/zigbee2mqtt"
+Z2M_DATA_DIR="$Z2M_DIR/data"
+STORE_DIR="$PZG_ROOT/.pnpm-store"
+CACHE_DIR="$PZG_ROOT/.cache"
+LOGS_DIR="$PZG_ROOT/logs"
+
+NODE_BASE_URL="https://nodejs.org/dist/v$USE_NODE_VERSION"
+Z2M_TARBALL_URL="https://github.com/Koenkk/zigbee2mqtt/archive/refs/tags/$ZIGBEE2MQTT_VERSION.tar.gz"
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 # Setup logging and error reporting
-SCRIPT_NAME="$(basename "$0")"
 COMMAND_BUFFER="$(mktemp)"
 RED="\033[0;31m"
 NC="\033[0m" # No Color
 
-trap "rm -f "$COMMAND_BUFFER EXIT
+trap 'rm -f "$COMMAND_BUFFER"' EXIT
+
+term_width() {
+    tput cols 2>/dev/null || echo 80
+}
 
 log_info() {
-    echo "[$SCRIPT_NAME]: $1" | fold -s -w "$(tput cols)"
+    echo "[$SCRIPT_NAME]: $1" | fold -s -w "$(term_width)"
 }
 
 log_error() {
-    echo -e "${RED}[$SCRIPT_NAME]: ERROR: $1${NC}" | fold -s -w "$(tput cols)" >&2
+    echo -e "${RED}[$SCRIPT_NAME]: ERROR: $1${NC}" | fold -s -w "$(term_width)" >&2
 }
 
 log_error_dump() {
@@ -59,232 +78,517 @@ log_error_dump() {
 }
 
 log_warning() {
-    echo -e "${RED}[$SCRIPT_NAME]: WARNING: $1${NC}" | fold -s -w "$(tput cols)" >&2
+    echo -e "${RED}[$SCRIPT_NAME]: WARNING: $1${NC}" | fold -s -w "$(term_width)" >&2
+}
+
+# Runs a command, hiding its output unless it fails.
+run_step() {
+    local description="$1"
+    shift
+
+    log_info "$description"
+
+    if ! "$@" > "$COMMAND_BUFFER" 2>&1; then
+        log_error "Failed while doing: $description"
+        log_error "The failing command was: $*"
+        log_error "During the failed operation the following output was emitted:"
+        log_error "--------------------"
+        log_error_dump "$(cat "$COMMAND_BUFFER")"
+        exit 1
+    fi
 }
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-$SETUP_VENV_SCRIPT $USE_PYTHON_VERSION
-source .venv/bin/activate
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Handle command line arguments
+FORCE=0
 
-log_info "Installing nodeenv into the local Python virtual environment."
-if ! pip install nodeenv > "$COMMAND_BUFFER" 2>&1; then
-    log_error "Failed to install nodeenv using 'pip install nodeenv'"
-    log_error "During the failed operation the following output was emitted:"
-    log_error "--------------------"
-    log_error_dump "$(cat "$COMMAND_BUFFER")"
+print_usage() {
+    cat >&2 <<EOF
+Usage: $SCRIPT_NAME [--force]
+
+Installs Zigbee2MQTT $ZIGBEE2MQTT_VERSION into the current directory, together
+with a private Node.js $USE_NODE_VERSION toolchain. Run this in an empty
+directory.
+
+  -h, --help   Show this message.
+      --force  Remove a previous installation from this directory first.
+               Refuses to run if zigbee2mqtt/data exists, because that
+               directory holds your configuration and device pairings.
+
+Installing as a service afterwards requires sudo. See the generated
+UNINSTALL.md for exactly what this leaves outside this directory.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help) print_usage; exit 0 ;;
+        --force)   FORCE=1; shift ;;
+        *)
+            log_error "Unknown argument: $1"
+            print_usage
+            exit 1
+            ;;
+    esac
+done
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Preflight
+if [[ "$(uname)" != "Darwin" ]]; then
+    log_error "This script only supports macOS. Detected: $(uname)."
     exit 1
 fi
 
-log_info "Installing node.js version $USE_NODE_VERSION using nodeenv."
-if ! nodeenv -p -n $USE_NODE_VERSION > "$COMMAND_BUFFER" 2>&1; then
-    log_error "Failed to node version $USE_NODE_VERSION using 'nodeenv -p -n $USE_NODE_VERSION'"
-    log_error "During the failed operation the following output was emitted:"
-    log_error "--------------------"
-    log_error_dump "$(cat "$COMMAND_BUFFER")"
+case "$(uname -m)" in
+    arm64)  NODE_PLATFORM="darwin-arm64" ;;
+    x86_64) NODE_PLATFORM="darwin-x64" ;;
+    *)
+        log_error "Unsupported architecture: $(uname -m). Expected arm64 or x86_64."
+        exit 1
+        ;;
+esac
+
+NODE_TARBALL="node-v$USE_NODE_VERSION-$NODE_PLATFORM.tar.gz"
+NODE_UNPACKED="node-v$USE_NODE_VERSION-$NODE_PLATFORM"
+
+if [[ -e "$Z2M_DATA_DIR" ]]; then
+    log_error "$Z2M_DATA_DIR already exists."
+    log_error "That directory holds your Zigbee2MQTT configuration and device pairings, and this script will not delete it."
+    log_error "Move it somewhere safe, then re-run. You can copy it back into the new installation afterwards."
     exit 1
 fi
 
-# The -p switch instructed nodeenv add node.js related stuff to the virtual
-# environment. We reactivate the venv to ensure that nodeenv added paths are
-# also active.
-deactivate
-source .venv/bin/activate
+EXISTING=()
+for path in "$NODE_DIR" "$Z2M_DIR" "$STORE_DIR" "$CACHE_DIR"; do
+    [[ -e "$path" ]] && EXISTING+=("$path")
+done
 
-log_info "Installing pnpm using npm."
-if ! npm install pnpm --save-dev > "$COMMAND_BUFFER" 2>&1; then
-    log_error "Failed to install pnpm using 'npm install pnpm --save-dev'"
-    log_error "During the failed operation the following output was emitted:"
-    log_error "--------------------"
-    log_error_dump "$(cat "$COMMAND_BUFFER")"
+if [[ ${#EXISTING[@]} -gt 0 ]]; then
+    if [[ $FORCE -eq 0 ]]; then
+        log_error "This directory already contains an installation:"
+        for path in "${EXISTING[@]}"; do
+            log_error "    $path"
+        done
+        log_error "Re-run with --force to remove these and start over, or run this script in an empty directory."
+        exit 1
+    fi
+
+    log_warning "--force given, removing previous installation."
+    rm -rf "${EXISTING[@]}"
+fi
+
+for tool in curl tar shasum awk; do
+    if ! command -v "$tool" > /dev/null 2>&1; then
+        log_error "Required tool '$tool' not found. It ships with macOS, so something is unusual about this system."
+        exit 1
+    fi
+done
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Install a private Node.js toolchain
+mkdir -p "$CACHE_DIR" "$LOGS_DIR"
+
+run_step "Downloading Node.js $USE_NODE_VERSION for $NODE_PLATFORM." \
+    curl -fsSL -o "$PZG_ROOT/$NODE_TARBALL" "$NODE_BASE_URL/$NODE_TARBALL"
+
+log_info "Verifying the Node.js download against the published SHA-256 checksum."
+
+if ! curl -fsSL "$NODE_BASE_URL/SHASUMS256.txt" \
+        | awk -v want="$NODE_TARBALL" '$2 == want { print; found = 1 } END { exit !found }' \
+        > "$PZG_ROOT/$NODE_TARBALL.sha256" 2>/dev/null; then
+    log_error "Could not find a published checksum for $NODE_TARBALL."
+    log_error "Check that USE_NODE_VERSION ($USE_NODE_VERSION) is a real published Node.js release."
+    rm -f "$PZG_ROOT/$NODE_TARBALL" "$PZG_ROOT/$NODE_TARBALL.sha256"
     exit 1
 fi
 
-export PATH="$(pwd)/node_modules/.bin:$PATH"
-
-log_info "Cloning zigbee2mqtt version $ZIGBEE2MQTT_VERSION"
-if ! git clone --depth 1 --branch $ZIGBEE2MQTT_VERSION https://github.com/Koenkk/zigbee2mqtt.git > "$COMMAND_BUFFER" 2>&1; then
-    log_error "Failed to download zigbee2mqtt using 'git clone --depth 1 --branch ZIGBEE2MQTT_VERSION https://github.com/Koenkk/zigbee2mqtt.git'"
-    log_error "During the failed operation the following output was emitted:"
+if ! (cd "$PZG_ROOT" && shasum -a 256 -c "$NODE_TARBALL.sha256") > "$COMMAND_BUFFER" 2>&1; then
+    log_error "Checksum verification FAILED for $NODE_TARBALL."
+    log_error "The download is corrupt or has been tampered with. Not unpacking it."
     log_error "--------------------"
     log_error_dump "$(cat "$COMMAND_BUFFER")"
+    rm -f "$PZG_ROOT/$NODE_TARBALL" "$PZG_ROOT/$NODE_TARBALL.sha256"
     exit 1
 fi
 
-pushd zigbee2mqtt &> /dev/null;
+run_step "Unpacking Node.js into $NODE_DIR." \
+    tar -xzf "$PZG_ROOT/$NODE_TARBALL" -C "$PZG_ROOT"
 
-log_info "Installing zigbee2mqtt"
-if ! pnpm install --frozen-lockfile > "$COMMAND_BUFFER" 2>&1; then
-    log_error "Failed to install zigbee2mqtt using 'pnpm install --frozen-lockfile'"
-    log_error "During the failed operation the following output was emitted:"
-    log_error "--------------------"
-    log_error_dump "$(cat "$COMMAND_BUFFER")"
-    exit 1
-fi
+mv "$PZG_ROOT/$NODE_UNPACKED" "$NODE_DIR"
+rm -f "$PZG_ROOT/$NODE_TARBALL" "$PZG_ROOT/$NODE_TARBALL.sha256"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-popd &> /dev/null;
-
-MQTT_PRECHECK_SCRIPT="$(pwd)/check-if-z2m-mqtt-is-listening"
-
-cat << 'HERE_DOCUMENT_MARK' > "$MQTT_PRECHECK_SCRIPT"
-#!/usr/bin/env python3
-
-# YOU ARE NOT SUPPOSED TO MANUALLY CALL THIS SCRIPT
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Generate env.sh, the single source of truth for the contained environment.
 #
-# It is used by install-z2m to determine if the MQTT server in its configuration
-# is up and running. This way a service manager can avoid starting Zigbee2MQTT
-# before the MQTT server is up, avoiding missing device information observed
-# in version 2.6.1.
+# Every generated script sources this instead of relying on anything installed
+# system-wide. The cache redirections are what keep the installation contained
+# to this directory -- each one has a default under $HOME that we are steering
+# away from. See UNINSTALL.md for the full inventory.
+log_info "Writing env.sh."
 
-import socket
-from pathlib import Path
-from time import sleep
+cat > "$PZG_ROOT/env.sh" <<PZG_ENV_HEAD
+#!/usr/bin/env bash
+# Generated by $SCRIPT_NAME. Sourced by the other pzg-* scripts.
+# Do not run directly.
 
+export PZG_SERVICE_NAME="$SERVICE_NAME"
+PZG_ENV_HEAD
 
-# The absolute minimum YAML parsing to avoid a dependency on a YAML library.
-def get_mqtt_address(config_path):
-    if not config_path.exists():
-        return None
+cat >> "$PZG_ROOT/env.sh" <<'PZG_ENV_BODY'
 
-    state = "init"
+PZG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"; pwd)"
+export PZG_ROOT
 
-    with open(config_path) as f:
-        if "network_key: GENERATE" in f.read():
-            # The configuration file is still in its default state, so we can't be
-            # sure about the MQTT configuration. Maybe Z2M isn't configured yet.
-            # We don't know for sure so we don't block further operations.
-            return None
+# The contained Node.js toolchain, ahead of anything system-wide.
+export PATH="$PZG_ROOT/node/bin:$PATH"
 
-        for line in f:
-            if state == "init":
-                if line.startswith("mqtt:"):
-                    state = "mqtt_section"
-                continue
-            if state == "mqtt_section":
-                if not line.startswith(" "):
-                    # End of MQTT section, no address found
-                    return None
-                if "server:" in line:
-                    return line.split(":", 1)[1].strip()
-                continue
+# Redirect every cache that would otherwise be written under $HOME.
+export PNPM_HOME="$PZG_ROOT/.cache/pnpm"
+export COREPACK_HOME="$PZG_ROOT/.cache/corepack"
+export npm_config_cache="$PZG_ROOT/.cache/npm"
+export npm_config_devdir="$PZG_ROOT/.cache/node-gyp"
+export npm_config_store_dir="$PZG_ROOT/.pnpm-store"
 
-    return None
+# corepack prompts before downloading a package manager, which would hang an
+# unattended install or a service start.
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+PZG_ENV_BODY
 
+chmod u+x "$PZG_ROOT/env.sh"
 
-mqtt_host = get_mqtt_address(Path("data") / "configuration.yaml")
+# shellcheck source=/dev/null
+source "$PZG_ROOT/env.sh"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-if mqtt_host is None:
-    # We didn't find the MQTT configuration, so we can't check it. Maybe Z2M
-    # isn't configured yet. We don't know for sure so we don't block further
-    # operations.
-    exit(0)
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Enable corepack, which provides pnpm.
+#
+# corepack reads the "packageManager" field from zigbee2mqtt's package.json and
+# fetches exactly that pnpm version, so pnpm stays in step with whatever
+# upstream tested against rather than floating to latest.
+run_step "Enabling corepack in the contained Node.js installation." \
+    "$NODE_BIN/corepack" enable --install-directory "$NODE_BIN"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-address, _, maybe_port = mqtt_host.replace("mqtt://", "").partition(":")
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Fetch Zigbee2MQTT.
+#
+# The release tarball is used rather than a git clone, because /usr/bin/git on
+# a fresh macOS install is an Xcode Command Line Tools stub that opens a GUI
+# dialog instead of running. Zigbee2MQTT handles the absence of git fine: its
+# index.js resolves the commit hash to "unknown" and skips the rebuild-on-hash-
+# change path, which is what we want for a pinned install anyway.
+run_step "Downloading Zigbee2MQTT $ZIGBEE2MQTT_VERSION." \
+    curl -fsSL -o "$PZG_ROOT/zigbee2mqtt.tar.gz" "$Z2M_TARBALL_URL"
 
-try:
-    port = int(maybe_port) if maybe_port else 1883
-except ValueError:
-    exit(0)
+mkdir -p "$Z2M_DIR"
 
+run_step "Unpacking Zigbee2MQTT into $Z2M_DIR." \
+    tar -xzf "$PZG_ROOT/zigbee2mqtt.tar.gz" -C "$Z2M_DIR" --strip-components=1
 
-try:
-    with socket.create_connection((address, port), timeout=5):
-        exit(0)
-except Exception as e:
-    pass
+rm -f "$PZG_ROOT/zigbee2mqtt.tar.gz"
 
-sleep(5)
-exit(1)
-HERE_DOCUMENT_MARK
+log_info "Checking that Node.js $USE_NODE_VERSION satisfies this Zigbee2MQTT release."
 
-chmod u+x "$MQTT_PRECHECK_SCRIPT"
+if ! (cd "$Z2M_DIR" && "$NODE_BIN/node" -e '
+    const fs = require("fs");
+    const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+    const engines = (pkg.engines && pkg.engines.node) || "";
 
-cat << 'HERE_DOCUMENT_MARK' > "$RUN_Z2M_SCRIPT"
+    if (!engines) {
+        process.exit(0);
+    }
+
+    // engines.node looks like "^20 || ^22 || ^24", so comparing the set of
+    // major versions is enough, and avoids needing semver before the install.
+    //
+    // Caveat: this assumes that form. If upstream ever switches to an open
+    // range like ">=20", every newer node would be reported as incompatible.
+    // If this check fails on a version you believe is fine, look here first.
+    const majors = engines.match(/\d+/g) || [];
+    const current = process.versions.node.split(".")[0];
+
+    if (majors.length && !majors.includes(current)) {
+        console.error("  zigbee2mqtt requires node: " + engines);
+        console.error("  USE_NODE_VERSION is:       " + process.versions.node);
+        process.exit(1);
+    }
+') > "$COMMAND_BUFFER" 2>&1; then
+    log_error "The pinned Node.js version is not compatible with Zigbee2MQTT $ZIGBEE2MQTT_VERSION."
+    log_error_dump "$(cat "$COMMAND_BUFFER")"
+    log_error "Edit USE_NODE_VERSION at the top of this script to a matching version and re-run with --force."
+    exit 1
+fi
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Install dependencies and build.
+log_info "Installing Zigbee2MQTT dependencies. This takes a few minutes."
+
+if ! (cd "$Z2M_DIR" && pnpm install --frozen-lockfile --store-dir "$STORE_DIR") > "$COMMAND_BUFFER" 2>&1; then
+    log_error "Failed to install Zigbee2MQTT dependencies."
+    log_error "--------------------"
+    log_error_dump "$(cat "$COMMAND_BUFFER")"
+    log_error "--------------------"
+
+    if grep -qiE "node-gyp|gyp ERR|clang|xcrun|command line tools" "$COMMAND_BUFFER"; then
+        log_error "The output above mentions a native build. This usually means a dependency had no prebuilt binary for this machine and tried to compile from source, which needs the Xcode Command Line Tools:"
+        log_error ""
+        log_error "    xcode-select --install"
+        log_error ""
+        log_error "Note that this is a system-wide install of roughly 1.5 GB that this script can neither contain nor remove."
+    fi
+
+    exit 1
+fi
+
+# Build now rather than letting the first start do it.
+#
+# Zigbee2MQTT has no "prepare" script, so `pnpm install` does not build. Its
+# index.js compiles on first start instead, when dist/.hash is missing. Under
+# launchd with KeepAlive that turns a build failure into a restart loop that
+# recompiles every cycle, at whatever hour it happens. Building here means
+# failures surface now, and every subsequent start is fast.
+log_info "Building Zigbee2MQTT. This also takes a few minutes."
+
+if ! (cd "$Z2M_DIR" && pnpm run build) > "$COMMAND_BUFFER" 2>&1; then
+    log_error "Failed to build Zigbee2MQTT."
+    log_error "--------------------"
+    log_error_dump "$(cat "$COMMAND_BUFFER")"
+    exit 1
+fi
+
+if [[ ! -f "$Z2M_DIR/dist/.hash" ]]; then
+    log_warning "The build finished but $Z2M_DIR/dist/.hash is missing. Zigbee2MQTT will rebuild itself on first start, which is slow but not fatal."
+fi
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Generate the MQTT precheck.
+#
+# This runs before every Zigbee2MQTT start. If the configured MQTT broker is
+# not accepting connections yet, it fails so the service manager retries later,
+# rather than letting Zigbee2MQTT start against a dead broker -- which loses
+# device information (observed on 2.6.1).
+#
+# It runs under the contained Node.js and parses the config with js-yaml, a
+# direct Zigbee2MQTT dependency, so quoted values, inline comments and unusual
+# nesting are handled by a real YAML parser.
+log_info "Writing pzg-check-mqtt."
+
+cat > "$PZG_ROOT/pzg-check-mqtt" <<'PZG_CHECK_MQTT'
+#!/usr/bin/env node
+
+// YOU ARE NOT SUPPOSED TO CALL THIS SCRIPT MANUALLY.
+//
+// Used by pzg-run-z2m to decide whether the configured MQTT broker is up.
+//
+// Exit 0 means "go ahead and start Zigbee2MQTT". That includes every case
+// where we cannot tell -- an unconfigured install, an unparseable config, a
+// missing broker setting. We only block when we positively know there is a
+// broker address and it is not accepting connections.
+
+const fs = require("node:fs");
+const net = require("node:net");
+const path = require("node:path");
+
+const Z2M_DIR = path.join(__dirname, "zigbee2mqtt");
+const CONFIG_PATH = path.join(Z2M_DIR, "data", "configuration.yaml");
+
+const DEFAULT_PORTS = {"mqtt:": 1883, "mqtts:": 8883, "ws:": 80, "wss:": 443};
+const CONNECT_TIMEOUT_MS = 5000;
+
+function proceed() {
+    process.exit(0);
+}
+
+function block(reason) {
+    console.error(`MQTT broker is not reachable: ${reason}`);
+    process.exit(1);
+}
+
+if (!fs.existsSync(CONFIG_PATH)) {
+    proceed();
+}
+
+const raw = fs.readFileSync(CONFIG_PATH, "utf8");
+
+// A freshly generated config has not been through onboarding yet, so its mqtt
+// section is not meaningful. Checked on the raw text, before parsing.
+if (raw.includes("network_key: GENERATE")) {
+    proceed();
+}
+
+let config;
+
+try {
+    const yaml = require(path.join(Z2M_DIR, "node_modules", "js-yaml"));
+    config = yaml.load(raw);
+} catch {
+    proceed();
+}
+
+const server = config && config.mqtt && config.mqtt.server;
+
+if (typeof server !== "string" || server === "") {
+    proceed();
+}
+
+let host;
+let port;
+
+try {
+    const url = new URL(server);
+    host = url.hostname;
+    port = url.port ? Number.parseInt(url.port, 10) : DEFAULT_PORTS[url.protocol];
+} catch {
+    proceed();
+}
+
+if (!host || !Number.isInteger(port)) {
+    proceed();
+}
+
+const socket = net.createConnection({host, port});
+
+socket.setTimeout(CONNECT_TIMEOUT_MS);
+
+socket.on("connect", () => {
+    socket.end();
+    proceed();
+});
+
+socket.on("timeout", () => {
+    socket.destroy();
+    block(`timed out connecting to ${host}:${port}`);
+});
+
+socket.on("error", (error) => {
+    block(`${host}:${port} - ${error.message}`);
+});
+PZG_CHECK_MQTT
+
+chmod u+x "$PZG_ROOT/pzg-check-mqtt"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Generate the run script.
+log_info "Writing pzg-run-z2m."
+
+cat > "$PZG_ROOT/pzg-run-z2m" <<'PZG_RUN_Z2M'
 #!/usr/bin/env bash
 
-SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
-cd "$SELF_DIR"
-source .venv/bin/activate
-export PATH="$(pwd)/node_modules/.bin:$PATH"
-cd zigbee2mqtt
+# Starts Zigbee2MQTT in the foreground using the contained toolchain.
+# This is what the launchd service runs.
 
-if ! "$SELF_DIR/check-if-z2m-mqtt-is-listening"; then
-    echo "Error: MQTT broker is not listening. Please start the MQTT broker before running zigbee2mqtt."
+set -euo pipefail
+
+PZG_ROOT="$(cd "$(dirname "$0")"; pwd)"
+
+# shellcheck source=/dev/null
+source "$PZG_ROOT/env.sh"
+
+if ! "$PZG_ROOT/node/bin/node" "$PZG_ROOT/pzg-check-mqtt"; then
+    echo "Refusing to start Zigbee2MQTT before its MQTT broker is listening." >&2
     exit 1
 fi
 
-pnpm start
-HERE_DOCUMENT_MARK
+cd "$PZG_ROOT/zigbee2mqtt"
 
-chmod u+x "$RUN_Z2M_SCRIPT"
+# exec, and node directly rather than `pnpm start`, so that SIGTERM from
+# launchd reaches Zigbee2MQTT itself. It handles SIGTERM to shut the Zigbee
+# database down cleanly; an intermediate shell or pnpm process would swallow
+# that. `pnpm start` is exactly `node index.js`.
+exec "$PZG_ROOT/node/bin/node" index.js
+PZG_RUN_Z2M
 
-cat << 'HERE_DOCUMENT_MARK' > "$START_SERVICE_SCRIPT"
-#!/bin/bash
-
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# Configuration.
-SERVICE_NAME="io.zigbee2mqtt"
-SERVICE_PATH="/Library/LaunchDaemons/$SERVICE_NAME.plist"
+chmod u+x "$PZG_ROOT/pzg-run-z2m"
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# Script constants
-SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
-RUN_Z2M_SCRIPT="$SELF_DIR/pzg-run-z2m"
-# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# Generate the service scripts.
+#
+# A LaunchDaemon rather than a LaunchAgent, so that a Zigbee coordinator comes
+# back up after a reboot without anyone logging in. That costs a sudo, and it
+# is the one thing this installation puts outside its own directory.
+log_info "Writing pzg-service-install and pzg-service-uninstall."
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# Setup logging and error reporting
+cat > "$PZG_ROOT/pzg-service-install" <<'PZG_SERVICE_INSTALL'
+#!/usr/bin/env bash
+
+# Installs Zigbee2MQTT as a launchd system daemon so it starts at boot.
+# Must be run with sudo.
+
+set -euo pipefail
+
+PZG_ROOT="$(cd "$(dirname "$0")"; pwd)"
+
+# shellcheck source=/dev/null
+source "$PZG_ROOT/env.sh"
+
 SCRIPT_NAME="$(basename "$0")"
-COMMAND_BUFFER="$(mktemp)"
+SERVICE_PATH="/Library/LaunchDaemons/$PZG_SERVICE_NAME.plist"
 RED="\033[0;31m"
-NC="\033[0m" # No Color
-
-trap "rm -f "$COMMAND_BUFFER EXIT
+NC="\033[0m"
 
 log_info() {
-    echo "[$SCRIPT_NAME]: $1" | fold -s -w "$(tput cols)"
+    echo "[$SCRIPT_NAME]: $1"
 }
 
 log_error() {
-    echo -e "${RED}[$SCRIPT_NAME]: ERROR: $1${NC}" | fold -s -w "$(tput cols)" >&2
+    echo -e "${RED}[$SCRIPT_NAME]: ERROR: $1${NC}" >&2
 }
-
-log_error_dump() {
-    echo -e "${RED}$1${NC}" >&2
-}
-
-log_warning() {
-    echo -e "${RED}[$SCRIPT_NAME]: WARNING: $1${NC}" | fold -s -w "$(tput cols)" >&2
-}
-# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 if [[ "$(uname)" != "Darwin" ]]; then
-    log_error "This script is only supported on macOS."
-    return 0
+    log_error "This script only supports macOS."
+    exit 1
 fi
 
-$SELF_DIR/pzg-stop-and-uninstall-z2m-as-a-service
+if [[ "$(id -u)" -ne 0 ]]; then
+    log_error "This script installs a system daemon and must be run with sudo:"
+    log_error "    sudo \"$PZG_ROOT/$SCRIPT_NAME\""
+    exit 1
+fi
 
-log_info "Installing zigbee2mqtt service at $SERVICE_PATH"
+# Run the daemon as the user who invoked sudo, not as root. The installation
+# directory and its caches belong to that user.
+RUN_AS_USER="${SUDO_USER:-$USER}"
 
-cat << HEREDOC > "$SERVICE_PATH"
+if [[ -z "$RUN_AS_USER" || "$RUN_AS_USER" == "root" ]]; then
+    log_error "Could not determine which user to run the service as."
+    log_error "Run this via sudo from your normal user account rather than a root shell."
+    exit 1
+fi
+
+"$PZG_ROOT/pzg-service-uninstall"
+
+mkdir -p "$PZG_ROOT/logs"
+chown "$RUN_AS_USER" "$PZG_ROOT/logs"
+
+log_info "Installing $PZG_SERVICE_NAME at $SERVICE_PATH, running as $RUN_AS_USER."
+
+cat > "$SERVICE_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>$SERVICE_NAME</string>
+    <string>$PZG_SERVICE_NAME</string>
 
     <key>UserName</key>
-    <string>$USER</string>
+    <string>$RUN_AS_USER</string>
 
     <key>ProgramArguments</key>
     <array>
-        <string>$RUN_Z2M_SCRIPT</string>
+        <string>$PZG_ROOT/pzg-run-z2m</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>$SELF_DIR</string>
+    <string>$PZG_ROOT</string>
 
     <key>RunAtLoad</key>
     <true/>
@@ -293,111 +597,198 @@ cat << HEREDOC > "$SERVICE_PATH"
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/$SERVICE_NAME/stdout.log</string>
+    <string>$PZG_ROOT/logs/stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/$SERVICE_NAME/stderr.log</string>
+    <string>$PZG_ROOT/logs/stderr.log</string>
 </dict>
 </plist>
-HEREDOC
+PLIST
 
-log_info "Loading service..."
-launchctl load $SERVICE_PATH
+# launchd refuses to load a daemon plist that is not owned by root:wheel.
+chown root:wheel "$SERVICE_PATH"
+chmod 644 "$SERVICE_PATH"
 
-if [ $? -ne 0 ]; then
-    echo "[pyziggy-setup] Error: Failed to load service $SERVICE_PATH"
+log_info "Loading the service."
+
+if ! launchctl bootstrap system "$SERVICE_PATH"; then
+    log_error "Failed to load $SERVICE_PATH"
     exit 1
-else
-    echo "[pyziggy-setup] Done."
-    echo "[pyziggy-setup] Service logs are saved to /tmp/$SERVICE_NAME/stdout.log and /tmp/$SERVICE_NAME/stderr.log"
 fi
-HERE_DOCUMENT_MARK
 
-chmod u+x "$START_SERVICE_SCRIPT"
+launchctl enable "system/$PZG_SERVICE_NAME"
 
-cat << 'HERE_DOCUMENT_MARK' > "$STOP_SERVICE_SCRIPT"
-#!/bin/bash
+log_info "Done. Zigbee2MQTT is running and will start again at boot."
+log_info ""
+log_info "Follow the logs with:"
+log_info "    tail -f \"$PZG_ROOT/logs/stdout.log\""
+log_info "    tail -f \"$PZG_ROOT/logs/stderr.log\""
+log_info ""
+log_info "Check the service with:"
+log_info "    sudo launchctl print system/$PZG_SERVICE_NAME"
+PZG_SERVICE_INSTALL
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# Configuration.
-SERVICE_NAME="io.zigbee2mqtt"
-SERVICE_PATH="$HOME/Library/LaunchAgents/$SERVICE_NAME.plist"
-# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+chmod u+x "$PZG_ROOT/pzg-service-install"
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# Script constants
-SELF_DIR="$(cd "$(dirname "$0")"; pwd)"
-# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+cat > "$PZG_ROOT/pzg-service-uninstall" <<'PZG_SERVICE_UNINSTALL'
+#!/usr/bin/env bash
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# Setup logging and error reporting
+# Stops the Zigbee2MQTT launchd daemon and removes its definition.
+# Must be run with sudo. Leaves the installation directory untouched.
+
+set -euo pipefail
+
+PZG_ROOT="$(cd "$(dirname "$0")"; pwd)"
+
+# shellcheck source=/dev/null
+source "$PZG_ROOT/env.sh"
+
 SCRIPT_NAME="$(basename "$0")"
-COMMAND_BUFFER="$(mktemp)"
+SERVICE_PATH="/Library/LaunchDaemons/$PZG_SERVICE_NAME.plist"
 RED="\033[0;31m"
-NC="\033[0m" # No Color
-
-trap "rm -f "$COMMAND_BUFFER EXIT
+NC="\033[0m"
 
 log_info() {
-    echo "[$SCRIPT_NAME]: $1" | fold -s -w "$(tput cols)"
+    echo "[$SCRIPT_NAME]: $1"
 }
 
 log_error() {
-    echo -e "${RED}[$SCRIPT_NAME]: ERROR: $1${NC}" | fold -s -w "$(tput cols)" >&2
+    echo -e "${RED}[$SCRIPT_NAME]: ERROR: $1${NC}" >&2
 }
-
-log_error_dump() {
-    echo -e "${RED}$1${NC}" >&2
-}
-
-log_warning() {
-    echo -e "${RED}[$SCRIPT_NAME]: WARNING: $1${NC}" | fold -s -w "$(tput cols)" >&2
-}
-# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 if [[ "$(uname)" != "Darwin" ]]; then
-    log_error "This script is only supported on macOS."
-    return 0
+    log_error "This script only supports macOS."
+    exit 1
 fi
 
-mkdir -p ~/Library/LaunchAgents
+if [[ "$(id -u)" -ne 0 ]]; then
+    log_error "This script removes a system daemon and must be run with sudo:"
+    log_error "    sudo \"$PZG_ROOT/$SCRIPT_NAME\""
+    exit 1
+fi
 
-if [ -f "$SERVICE_PATH" ] && (launchctl list | grep -q "$SERVICE_NAME"); then
-    log_info "Stopping and removing $SERVICE_NAME..."
-    launchctl unload "$SERVICE_PATH" && rm $SERVICE_PATH
+# bootout fails when the service is not loaded, which is fine here.
+if launchctl print "system/$PZG_SERVICE_NAME" > /dev/null 2>&1; then
+    log_info "Stopping $PZG_SERVICE_NAME."
+    launchctl bootout "system/$PZG_SERVICE_NAME" || true
+fi
 
-    if [ $? -ne 0 ]; then
-        log_error "Failed to unload and remove service $SERVICE_PATH"
-        exit 1
-    else
-        log_info "Done."
-    fi
-
-    rm /tmp/$SERVICE_NAME/stdout.log
-    rm /tmp/$SERVICE_NAME/stderr.log
+if [[ -f "$SERVICE_PATH" ]]; then
+    log_info "Removing $SERVICE_PATH."
+    rm -f "$SERVICE_PATH"
 else
-    log_info "No $SERVICE_NAME installation found."
+    log_info "No service definition found at $SERVICE_PATH."
 fi
-HERE_DOCUMENT_MARK
 
-chmod u+x "$STOP_SERVICE_SCRIPT"
+log_info "Done. Nothing outside this installation directory remains."
+PZG_SERVICE_UNINSTALL
 
-cat << HERE_DOCUMENT_MARK > "UNINSTALL.md"
-This directory contains a self-contained Zigbee2MQTT installation.
+chmod u+x "$PZG_ROOT/pzg-service-uninstall"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-The Zigbee2MQTT configuration can be found in the \`zigbee2mqtt/data\` directory.
-If you want to keep it, make sure to back up this directory before uninstalling.
-You can copy this directory into a fresh installation to restore the
-configuration.
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# Generate UNINSTALL.md, with paths resolved for this installation.
+#
+# Every command in it is quoted, because the installation path is substituted
+# in literally and may contain spaces. An unquoted `rm -rf` on such a path
+# deletes the wrong directories.
+log_info "Writing UNINSTALL.md."
 
-To uninstall Zigbee2MQTT, first run \`./pzg-stop-and-uninstall-z2m-as-a-service\`
-to stop the service and remove it.
+SPACE_NOTE=""
 
-Then you can delete this entire directory. This installation depends on \`pnpm\`.
-If you aren't using it for anything else, you can also delete the pnpm store
-directory: '$(pnpm store path)'."
-HERE_DOCUMENT_MARK
+if [[ "$PZG_ROOT" == *[[:space:]]* ]]; then
+    SPACE_NOTE="
+**The quotes in these commands are required.** This installation path contains
+a space, so without them \`rm -rf\` would delete the wrong directories.
+"
+fi
 
-log_info "Installation complete. See UNINSTALL.md for instructions about uninstalling."
-log_info "You can install zigbee2mqtt as a service and launch it by issuing:"
-log_info "    ./pzg-install-and-start-z2m-as-a-service"
+cat > "$PZG_ROOT/UNINSTALL.md" <<UNINSTALL_MD
+# Uninstalling this Zigbee2MQTT installation
+
+Installed by \`pzg-install-z2m\`.
+Zigbee2MQTT $ZIGBEE2MQTT_VERSION on Node.js $USE_NODE_VERSION.
+
+## Back this up first
+
+Your Zigbee2MQTT configuration and device pairings live in
+\`zigbee2mqtt/data\`. Losing that directory means re-pairing every device, and
+there is no upgrade path for this installation -- moving to a newer
+Zigbee2MQTT means installing fresh and copying it across -- so keep a copy
+even if you are not uninstalling.
+
+    cp -R "$Z2M_DATA_DIR" ~/zigbee2mqtt-data-backup
+
+## Uninstalling
+$SPACE_NOTE
+    sudo "$PZG_ROOT/pzg-service-uninstall"
+    rm -rf "$PZG_ROOT"
+
+That is the whole procedure. The rest of this document explains why.
+
+## What is contained
+
+Everything below lives inside \`$PZG_ROOT\` and goes away when you delete it.
+Each entry has a default location under your home directory that this
+installation deliberately steers away from, listed on the right.
+
+| What | Where it is | Where it would have gone |
+|---|---|---|
+| Node.js toolchain | \`node/\` | a system-wide or Homebrew install |
+| Zigbee2MQTT and its dependencies | \`zigbee2mqtt/\` | -- |
+| Your config and device pairings | \`zigbee2mqtt/data/\` | -- |
+| Zigbee2MQTT's own logs | \`zigbee2mqtt/data/log/\` | -- |
+| pnpm package store | \`.pnpm-store/\` | \`~/Library/pnpm/store\` |
+| pnpm home | \`.cache/pnpm/\` | \`~/Library/pnpm\` |
+| npm cache | \`.cache/npm/\` | \`~/.npm\` |
+| corepack cache | \`.cache/corepack/\` | \`~/.cache/node/corepack\` |
+| node-gyp cache | \`.cache/node-gyp/\` | \`~/Library/Caches/node-gyp\` |
+| Service logs | \`logs/\` | \`/tmp/$SERVICE_NAME/\` |
+
+The redirections are set in \`env.sh\`, which every generated script sources.
+
+## What is not contained
+
+Two things, both removed by \`pzg-service-uninstall\`:
+
+| What | Where |
+|---|---|
+| launchd service definition | \`/Library/LaunchDaemons/$SERVICE_NAME.plist\` |
+| launchd job registration | launchd's internal state, removed by \`launchctl bootout\` |
+
+launchd only reads service definitions from fixed system locations, so this
+cannot be contained. It is the only reason the uninstall needs sudo.
+
+If you never ran \`pzg-service-install\`, neither exists and \`rm -rf\` on this
+directory is genuinely all there is to it.
+
+## One possible exception
+
+If installing had to compile a native module from source, it would have
+required the Xcode Command Line Tools. Those install system-wide to
+\`/Library/Developer/CommandLineTools\`, are roughly 1.5 GB, and are not
+removed by anything here. The installer prints a message when it hits this,
+so if you do not remember seeing one, it did not happen.
+
+To check whether they are present, and remove them if you want to:
+
+    xcode-select -p
+    sudo rm -rf /Library/Developer/CommandLineTools
+
+Other software on your Mac may depend on them, so do not remove them
+reflexively.
+UNINSTALL_MD
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+log_info ""
+log_info "Installation complete."
+log_info ""
+log_info "Zigbee2MQTT $ZIGBEE2MQTT_VERSION is installed in $Z2M_DIR"
+log_info "See UNINSTALL.md for what this put on your system and how to remove it."
+log_info ""
+log_info "To run it in the foreground:"
+log_info "    ./pzg-run-z2m"
+log_info ""
+log_info "To install it as a service that starts at boot:"
+log_info "    sudo ./pzg-service-install"
+log_info ""
