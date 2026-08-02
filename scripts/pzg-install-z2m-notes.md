@@ -1,11 +1,20 @@
-# Migrating `pzg-install-z2m` off Python
+# `pzg-install-z2m` — design record and as-built notes
 
-Plan for rewriting the Zigbee2MQTT installer as a single self-contained shell
-script with no Python dependency, no pyziggy coupling, and an explicit
-containment story.
+**Status: implemented and working as of 2026-08-01.**
 
-Written 2026-08-01. Findings below were verified against Zigbee2MQTT 2.6.1,
-Node 22.22.0, and macOS 15 (Darwin 24.6.0) unless marked otherwise.
+The Zigbee2MQTT installer is now a single self-contained shell script with no
+Python dependency, no git dependency, no pyziggy coupling, and a containment
+story that has been measured rather than asserted.
+
+This document is both the reasoning behind the design (§1–§6, §9) and the
+record of what was actually built and verified (§7, §8, §10). Sections 1–6
+were written before the rewrite and describe findings that drove it; sections
+7, 8 and 10 were written after, and describe what shipped.
+
+Findings were verified against Zigbee2MQTT 2.6.1, Node 22.22.0, and macOS 15
+(Darwin 24.6.0) unless marked otherwise.
+
+**If you are here to do something rather than read, skip to §10.**
 
 ---
 
@@ -187,8 +196,18 @@ Run the installer in an empty directory. Everything below lives inside it.
 Two notes on this shape:
 
 - **`.pnpm-store` inside the install dir is a performance win, not just a
-  containment one.** pnpm hardlinks from the store into `node_modules`, and
-  hardlinks cannot cross filesystems. Co-locating them guarantees same-volume.
+  containment one.** pnpm links rather than copies from its store into
+  `node_modules`, and that linking cannot cross filesystems. Co-locating them
+  guarantees same-volume.
+
+  Measured afterwards: on this APFS volume pnpm does *not* use hardlinks —
+  sampled `node_modules` files have a link count of 1 — it uses APFS
+  copy-on-write clones, which is `package-import-method: auto`'s behaviour on
+  macOS. The same-volume requirement holds either way, since `clonefile` also
+  cannot cross volumes. But it means `du` double-counts: the store and
+  `node_modules` report 171M + 177M as though they were independent, while
+  their blocks are largely shared until something writes to them. Do not read
+  the 622M total for a full installation as 622M of consumed disk.
 - **`env.sh` replaces `source .venv/bin/activate`.** It is four exports you
   wrote and can read, instead of a generated venv script plus the
   deactivate/reactivate dance at
@@ -389,8 +408,11 @@ both. Two independent restart supervisors will fight. Recommend launchd
 
 ## 6. Bugs to fix in passing
 
-Found while reading the current script. Independent of the migration, but the
+Found while reading the old script. Independent of the migration, but the
 rewrite should not carry them forward.
+
+**All eight are fixed in the rewrite.** Line references below point at the old
+version, recoverable with `git show 8e0262f:scripts/pzg-install-z2m`.
 
 | # | Location | Issue |
 |---|---|---|
@@ -405,61 +427,168 @@ rewrite should not carry them forward.
 
 ---
 
-## 7. Migration phases
+## 7. What was built
 
-Ordered so each phase leaves something testable.
+Phases 1–9 are done. Phase 10 was deliberately skipped — see below.
 
-All design decisions are locked (§9) — this starts at phase 1.
-
-| Phase | Work | Done when |
+| Phase | Work | Status |
 |---|---|---|
-| 1 | Single-file skeleton: config block, `set -euo pipefail`, Darwin guard, logging helpers, `--help`, `--force`, non-empty-directory guard | `--help` works, exits 1 on non-Darwin, refuses to clobber a non-empty dir |
-| 2 | Contained node: arch map, download, checksum verify, unpack (§5.1) | `./node/bin/node --version` prints the pinned version |
-| 3 | `env.sh` + all cache redirections (§4.1) | Sourcing it gives node + the redirected cache vars |
-| 4 | Contained pnpm via corepack (§5.2) | `pnpm --version` prints 10.12.1, `.cache/corepack/` is populated, `~/Library/pnpm` was never created |
-| 5 | z2m acquisition via release tarball, `engines.node` preflight (§2.3, §2.5) | `zigbee2mqtt/` unpacked, version check passes, no git invoked |
-| 6 | `pnpm install --store-dir` + explicit `pnpm run build` (§5.3) | `zigbee2mqtt/dist/.hash` exists; `~/Library/pnpm/store` was never created |
-| 7 | Generated runtime artifacts: `pzg-run-z2m`, `pzg-check-mqtt` (§5.4), service install/uninstall with matching paths and local logs (§5.5) | `./pzg-run-z2m` starts z2m with **zero** rebuild output |
-| 8 | Generated `UNINSTALL.md` from the §4 inventory, with paths resolved at install time | Doc names every path in §4.1 and §4.2 concretely |
-| 9 | Update `bootstrap-z2m-installation.sh` — one file, drop `pzg-setup-venv` | One `curl` |
-| 10 | Optional: `HOME` override hardening (§4.4) | `.home/` empty after a full install |
+| 1 | Single-file skeleton, `set -euo pipefail`, Darwin + arch guard, `--help`, `--force`, existing-install guard | done |
+| 2 | Contained Node: arch map, download, SHA-256 verify, unpack | done |
+| 3 | `env.sh` + all six cache redirections | done |
+| 4 | Contained pnpm via corepack, driven by `packageManager` | done |
+| 5 | z2m release tarball, no git, `engines.node` gate | done |
+| 6 | `pnpm install --store-dir` + explicit `pnpm run build` | done |
+| 7 | Generated `pzg-run-z2m`, `pzg-check-mqtt`, service install/uninstall, local logs | done |
+| 8 | Generated `UNINSTALL.md` with resolved paths | done |
+| 9 | `bootstrap-z2m-installation.sh` down to one `curl` | done |
+| 10 | `HOME` override hardening (§4.4) | **skipped — not needed**, see §8 |
 
-`pzg-setup-venv` is not deleted by this — it may still serve the rest of the
-repo. It just stops being on this script's critical path.
+Phase 10 was a belt-and-braces catch-all for cache locations the explicit
+redirections might have missed. Measurement (§8) showed zero writes to any
+`$HOME` cache during a full install, including the native-compile path that
+was most likely to leak. Adding a `HOME` override would have bought nothing
+and made the run environment harder to reason about.
+
+`pzg-setup-venv` still exists and is untouched — it may serve the rest of the
+repo. It is simply no longer on this script's critical path.
+
+### What the installer produces
+
+```
+<install-dir>/
+├── env.sh                    # PATH + all cache redirections; sourced by every script
+├── node/                     # Node 22.22.0, checksum-verified
+├── zigbee2mqtt/              # z2m 2.6.1, built, with data/ underneath
+├── .pnpm-store/              # pnpm store (same volume as node_modules, so hardlinks work)
+├── .cache/                   # corepack, npm, node-gyp
+├── logs/                     # launchd stdout/stderr
+├── pzg-check-mqtt            # Node + js-yaml; broker reachability gate
+├── pzg-run-z2m               # sources env.sh, gates on the above, execs node
+├── pzg-service-install       # LaunchDaemon, needs sudo
+├── pzg-service-uninstall     # LaunchDaemon removal, needs sudo
+└── UNINSTALL.md              # generated, paths resolved, contained vs leaking
+```
+
+### Deviations from the plan
+
+Five things ended up different from §1–§6, all discovered during
+implementation or testing:
+
+1. **`pzg-run-z2m` ends in `exec node index.js`, not `pnpm start`.** They are
+   equivalent commands, but `exec`-ing node directly means launchd's SIGTERM
+   lands on Zigbee2MQTT itself. An intervening shell or pnpm process would
+   swallow it, and z2m needs that signal to close the Zigbee database cleanly.
+2. **The daemon plist is `chown root:wheel` / `chmod 644`.** launchd silently
+   refuses to load a LaunchDaemon plist that is not owned by root.
+3. **Every path in generated output is quoted.** The first version substituted
+   `$PZG_ROOT` bare into `UNINSTALL.md`, so an install directory containing a
+   space produced `rm -rf /Users/ati/Downloads/bery best` — two arguments,
+   deleting the wrong things. Found by testing in a directory with a space in
+   the name. `UNINSTALL.md` also gains a note that the quotes are load-bearing
+   when the path actually contains whitespace.
+4. **`env.sh` resolves its own location in both bash and zsh.**
+   `${BASH_SOURCE[0]}` is empty under zsh — the default macOS interactive
+   shell — which made `dirname` return `.` and silently resolved `PZG_ROOT` to
+   the current directory. It now handles both and fails loudly in anything
+   else.
+5. **`UNINSTALL.md`'s native-compile section is evidence-based.** It used to
+   say "the installer prints a message when it hits this, so if you do not
+   remember seeing one, it did not happen." That is wrong: the message only
+   prints on *failure*. A successful compile is silent, and one did in fact
+   happen (§8). It now tells you to look for `.cache/node-gyp/` instead.
 
 ---
 
-## 8. Verification
+## 8. Verification record
 
-The containment claim is testable, so test it rather than asserting it.
+### Static and unit checks
 
-**Before installing**, record which of these exist:
+| What | Result |
+|---|---|
+| `bash -n` on the installer | passes |
+| `bash -n` on all five generated scripts, extracted from their heredocs | passes |
+| `node --check` on generated `pzg-check-mqtt` | passes |
+| `pzg-check-mqtt` behaviour, 6 cases | 6/6 — see below |
+| MQTT URL parsing, 8 forms | correct, incl. per-scheme default ports and credentials in the URL |
+| `engines.node` gate, 5 cases | correct for z2m's `^20 \|\| ^22 \|\| ^24` form |
+| Generated-command tokenisation with a spacey path | all four commands receive the path as **one** argument |
+| `env.sh` sourced from a foreign cwd | correct `PZG_ROOT` under both bash and zsh |
 
-```sh
-~/Library/pnpm  ~/Library/pnpm/store  ~/.npm
-~/.cache/node/corepack  ~/Library/Caches/node/corepack
-~/Library/Caches/node-gyp  ~/Library/Preferences/pnpm
-```
+The six precheck cases: missing config → proceed; `network_key: GENERATE` →
+proceed; `js-yaml` unavailable → proceed; broker listening → proceed; broker
+refusing → block; unroutable host → block after a 5s timeout. The three
+"cannot tell" cases fail open by design, so an unconfigured install is never
+prevented from starting.
 
-**After a full install + service start + service stop**, re-check. Any path
-that appeared is a leak the script missed — either redirect it or add it to
-`UNINSTALL.md`. There is no third option; an undocumented leak is the specific
-failure this rewrite exists to prevent.
+The `engines.node` gate has one known limitation, commented in the script: it
+compares the set of major versions found in the range string, so an open form
+like `>=20` would false-fail every newer Node. z2m does not use that form.
 
-**Then test the uninstall claim end to end:**
+### Live install
 
-```sh
-./pzg-service-uninstall
-cd .. && rm -rf <install-dir>
-```
+A full install was run into a directory whose name contains a space
+(`~/Downloads/urkh` after an earlier `bery best` test), and inspected
+afterwards:
 
-Re-check the list. A clean run means goals 2 and 3 are actually met.
+| Check | Result |
+|---|---|
+| Node | v22.22.0, from the checksum-verified tarball |
+| pnpm | 10.12.1 — exactly the `packageManager` pin, via corepack |
+| Zigbee2MQTT | 2.6.1, `dist/` built at install time |
+| `dist/.hash` | `unknown` |
+| `pnpm store path` | `<install>/.pnpm-store/v10` |
+| Sizes | node 189M, zigbee2mqtt 177M, store 171M, cache 86M |
 
-**Fresh-machine test.** The strongest check is a VM with no Xcode CLT and no
-Homebrew. If §2.1 is right, the current script fails there twice (git clone,
-then python3 at every service start) and the rewrite doesn't fail at all. Worth
-doing once, because it's the difference between believing the CLT-stub finding
-and knowing it.
+`dist/.hash` containing `unknown` is §2.3 confirmed in practice: no git, so
+z2m's `currentHash()` resolves to `"unknown"`, the hash-changed rebuild path
+is never taken, and the build done at install time stands.
+
+### Containment — measured
+
+The install window was bracketed from file mtimes (`logs/` creation through
+`UNINSTALL.md` write; the whole install landed inside one minute). Nothing was
+written to any `$HOME` cache inside that window:
+
+| Path | Entries written during install |
+|---|---|
+| `~/Library/pnpm` | 0 |
+| `~/.npm` | 0 |
+| `~/Library/Caches/node-gyp` | 0 |
+| `~/.cache` | 0 |
+
+Those directories do exist on this machine and are large, which looks alarming
+until you check timestamps — they predate the install and belong to unrelated
+Node work. `~/Library/Caches/node-gyp` holds headers for 20.14.0, 24.3.0,
+24.7.0, 25.6.0 and 25.6.1, none of them ours.
+
+**The strongest result is that the riskiest leak was actually triggered.**
+`unix-dgram` had no usable prebuild and compiled from source, so node-gyp ran
+— and its headers went to `<install>/.cache/node-gyp/22.22.0`, not to
+`~/Library/Caches/node-gyp/22.22.0`. `@serialport/bindings-cpp` used its
+shipped prebuilds and did not compile, as predicted in §2.6.
+
+Method caveat: this is an after-the-fact "nothing written during the window"
+test derived from mtimes, not a before/after snapshot. It is good evidence,
+not proof.
+
+### Not verified
+
+Worth knowing before relying on any of it:
+
+- **The service path has never been run.** No plist exists at
+  `/Library/LaunchDaemons/io.zigbee2mqtt.plist`. `pzg-service-install`,
+  `pzg-service-uninstall`, `launchctl bootstrap`/`bootout`, the root:wheel
+  ownership requirement, and the precheck running under launchd are all
+  unexercised.
+- **No fresh-machine test.** This machine has full Xcode, so the §2.1
+  CLT-stub finding — the thing that motivated dropping git and Python — is
+  verified by inspection (identical hashes, 78 hardlinks) but not by watching
+  the old script fail on a clean VM.
+- **`--force` has not been exercised**, including its refusal to run when
+  `zigbee2mqtt/data` exists.
+- **Zigbee2MQTT has not been run against a real broker or coordinator** from
+  this installation.
 
 ---
 
@@ -481,5 +610,66 @@ Recorded so they don't get relitigated mid-rewrite.
 One consequence of dropping the upgrade path is worth keeping visible: since
 reinstalling is the only way forward, `zigbee2mqtt/data/` — config, pairings,
 and the device database — is the one directory a user genuinely cannot lose.
-The generated `UNINSTALL.md` (phase 8) must say so before it says anything
-about deleting the install directory.
+The generated `UNINSTALL.md` says so before it says anything about deleting
+the install directory.
+
+---
+
+## 10. Operating it
+
+### Installing
+
+```sh
+mkdir ~/zigbee2mqtt && cd ~/zigbee2mqtt
+curl -fLO https://raw.githubusercontent.com/bebump/bbmp_toolbox/main/scripts/pzg-install-z2m
+chmod +x pzg-install-z2m
+./pzg-install-z2m
+```
+
+Or `scripts/bootstrap-z2m-installation.sh`, which is those three lines.
+
+Then either `./pzg-run-z2m` to run it in the foreground, or
+`sudo ./pzg-service-install` to install it as a boot-time daemon. Read §8's
+"not verified" list before trusting the second one.
+
+### Changing the Zigbee2MQTT version
+
+Edit one line at the top of `scripts/pzg-install-z2m`:
+
+```sh
+ZIGBEE2MQTT_VERSION="2.6.1"
+```
+
+Then install into a **fresh directory** and copy `zigbee2mqtt/data/` across
+from the old one. There is no in-place upgrade (§9), and `--force` refuses to
+run while `zigbee2mqtt/data` exists precisely so this cannot happen by
+accident.
+
+If the new release needs a newer Node, the installer says so and stops, naming
+both the required range and the pinned version — bump `USE_NODE_VERSION` to a
+release that satisfies it. That check is a major-version comparison, so see
+the limitation noted in §8 if it ever refuses a version you believe is fine.
+
+### Uninstalling
+
+Follow the generated `UNINSTALL.md` in the install directory — it has the
+paths resolved and quoted for that specific installation. In short: `sudo
+./pzg-service-uninstall`, then delete the directory. Back up
+`zigbee2mqtt/data/` first.
+
+### If something breaks
+
+- **Service won't start.** `logs/stdout.log` and `logs/stderr.log` in the
+  install directory. `sudo launchctl print system/io.zigbee2mqtt`.
+- **"MQTT broker is not reachable"** — `pzg-check-mqtt` did its job; the
+  broker in `zigbee2mqtt/data/configuration.yaml` isn't accepting connections.
+  Run `./node/bin/node ./pzg-check-mqtt` by hand to see the address it tried.
+- **A rebuild happens on every start.** `zigbee2mqtt/dist/.hash` is missing.
+  Re-run `pnpm run build` in `zigbee2mqtt/` with `env.sh` sourced.
+- **`pnpm: command not found` after sourcing `env.sh`.** Sourcing works from
+  bash and zsh; anything else makes it exit with a message rather than
+  silently misresolve.
+
+### Reverting the whole rewrite
+
+The pre-rewrite script is at `git show 8e0262f:scripts/pzg-install-z2m`.

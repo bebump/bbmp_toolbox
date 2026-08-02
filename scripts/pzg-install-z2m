@@ -240,7 +240,22 @@ PZG_ENV_HEAD
 
 cat >> "$PZG_ROOT/env.sh" <<'PZG_ENV_BODY'
 
-PZG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"; pwd)"
+# Locate this file. BASH_SOURCE exists only in bash; zsh is the default
+# interactive shell on macOS, so someone sourcing this by hand gets zsh. With
+# no fallback, dirname of an empty string is ".", which would silently resolve
+# PZG_ROOT to the current directory and point PATH at a toolchain that is not
+# there. Better to be correct in both shells and loud in anything else.
+if [ -n "${BASH_SOURCE:-}" ]; then
+    _pzg_self="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    _pzg_self="$(eval 'printf %s "${(%):-%x}"')"
+else
+    echo "env.sh: cannot determine its own location in this shell. Source it from bash or zsh." >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+PZG_ROOT="$(cd "$(dirname "$_pzg_self")" && pwd)"
+unset _pzg_self
 export PZG_ROOT
 
 # The contained Node.js toolchain, ahead of anything system-wide.
@@ -764,11 +779,20 @@ directory is genuinely all there is to it.
 
 ## One possible exception
 
-If installing had to compile a native module from source, it would have
-required the Xcode Command Line Tools. Those install system-wide to
-\`/Library/Developer/CommandLineTools\`, are roughly 1.5 GB, and are not
-removed by anything here. The installer prints a message when it hits this,
-so if you do not remember seeing one, it did not happen.
+Some dependencies compile from source during installation rather than using a
+shipped prebuilt binary. That compile uses the Xcode Command Line Tools, which
+live system-wide in \`/Library/Developer/CommandLineTools\`, are roughly
+1.5 GB, and are neither installed nor removed by anything here -- they were
+already on this machine, or the install would have failed.
+
+A successful compile is silent; the installer only says something when one
+fails. To tell whether it happened here, look for the node-gyp cache:
+
+    ls "$CACHE_DIR/node-gyp"
+
+If that directory exists, at least one native module was compiled. Its build
+artifacts and downloaded headers are inside this installation and go away with
+it, but the Command Line Tools themselves do not.
 
 To check whether they are present, and remove them if you want to:
 
